@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mesa de rol</title>
+<style>
+  :root {
+    --bg: #14161a;
+    --panel: #1e2228;
+    --line: #333a44;
+    --text: #e8e6e1;
+    --accent: #4fb3a5;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .toolbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  .toolbar .group { display: flex; align-items: center; gap: 8px; }
+  .toolbar .group + .group { padding-left: 12px; border-left: 1px solid var(--line); }
+  button, input[type="text"] {
+    font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #0d1f1c; border-color: var(--accent); font-weight: 600; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  input[type="text"] { width: 130px; }
+  input[type="color"] { width: 36px; height: 32px; padding: 2px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+  input[type="range"] { width: 90px; accent-color: var(--accent); }
+  .file-name { color: #9aa0a8; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hint { margin-left: auto; color: #9aa0a8; font-size: 13px; }
+
+  .stage { flex: 1; display: grid; place-items: center; overflow: hidden; position: relative; }
+  .empty { color: #9aa0a8; text-align: center; max-width: 320px; }
+  #board {
+    position: relative; display: none;
+    background: center / 100% 100% no-repeat #000;
+    touch-action: none; user-select: none;
+  }
+  .token {
+    position: absolute; transform: translate(-50%, -50%);
+    aspect-ratio: 1; border-radius: 50%;
+    border: 3px solid var(--c, #888); background: var(--c, #888) center / cover no-repeat;
+    box-shadow: 0 2px 6px rgba(0,0,0,.6);
+    cursor: grab; touch-action: none;
+  }
+  .token.dragging { cursor: grabbing; z-index: 10; box-shadow: 0 6px 14px rgba(0,0,0,.7); }
+  .token .label {
+    position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+    margin-top: 3px; padding: 1px 6px; border-radius: 4px; white-space: nowrap;
+    background: rgba(0,0,0,.75); font-size: 12px; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <div class="group">
+    <button id="mapBtn" class="primary">Subir mapa</button>
+    <input id="mapFile" type="file" accept="image/*" hidden>
+  </div>
+
+  <div class="group">
+    <input id="tokName" type="text" placeholder="Nombre de la ficha" maxlength="30">
+    <input id="tokColor" type="color" value="#d9534f" title="Color del borde">
+    <button id="tokImgBtn" title="Imagen de la ficha (opcional)">Imagen</button>
+    <span id="tokImgName" class="file-name"></span>
+    <input id="tokImg" type="file" accept="image/*" hidden>
+    <label>Tamaño <input id="tokSize" type="range" min="2" max="15" value="5"></label>
+    <button id="tokAdd" class="primary">Añadir ficha</button>
+  </div>
+
+  <span class="hint">Arrastra para mover · doble clic en una ficha para borrarla</span>
+</div>
+
+<div class="stage" id="stage">
+  <p class="empty" id="empty">Todavía no hay mapa. Sube una imagen para empezar la sesión.</p>
+  <div id="board"></div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+const $ = (id) => document.getElementById(id);
+const board = $('board'), stage = $('stage'), empty = $('empty');
+const tokens = {};            // id -> elemento DOM
+let mapRatio = null;          // ancho / alto de la imagen del mapa
+
+/* ---------- Utilidades ---------- */
+
+// Redimensiona la imagen en el navegador para no enviar archivos enormes por la red.
+function fileToDataUrl(file, maxSide, mime, quality) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, maxSide / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * k);
+      c.height = Math.round(img.height * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL(mime, quality));
+    };
+    img.onerror = () => reject(new Error('No se pudo leer la imagen'));
+    img.src = url;
+  });
+}
+
+const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+
+/* ---------- Mapa ---------- */
+
+function setMap(dataUrl) {
+  if (!dataUrl) return;
+  const img = new Image();
+  img.onload = () => {
+    mapRatio = img.width / img.height;
+    board.style.backgroundImage = `url(${dataUrl})`;
+    board.style.display = 'block';
+    empty.style.display = 'none';
+    fitBoard();
+  };
+  img.src = dataUrl;
+}
+
+// El tablero mantiene la proporción del mapa y cabe en la ventana.
+// Las fichas usan porcentajes, así que se ven en el mismo sitio en todas las pantallas.
+function fitBoard() {
+  if (!mapRatio) return;
+  const w = stage.clientWidth, h = stage.clientHeight;
+  let bw = w, bh = w / mapRatio;
+  if (bh > h) { bh = h; bw = h * mapRatio; }
+  board.style.width = bw + 'px';
+  board.style.height = bh + 'px';
+}
+window.addEventListener('resize', fitBoard);
+
+$('mapBtn').onclick = () => $('mapFile').click();
+$('mapFile').onchange = async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    socket.emit('map:set', await fileToDataUrl(file, 2400, 'image/jpeg', 0.85));
+  } catch (err) { alert(err.message); }
+  e.target.value = '';
+};
+
+/* ---------- Fichas ---------- */
+
+function renderToken(t) {
+  if (tokens[t.id]) return;
+  const el = document.createElement('div');
+  el.className = 'token';
+  el.style.setProperty('--c', t.color);
+  el.style.width = t.size + '%';
+  el.style.left = t.x + '%';
+  el.style.top = t.y + '%';
+  if (t.image) el.style.backgroundImage = `url(${t.image})`;
+  if (t.name) {
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = t.name;
+    el.appendChild(label);
+  }
+  enableDrag(el, t.id);
+  el.ondblclick = () => {
+    if (confirm(`¿Borrar la ficha${t.name ? ' "' + t.name + '"' : ''}?`)) socket.emit('token:remove', t.id);
+  };
+  board.appendChild(el);
+  tokens[t.id] = el;
+}
+
+function enableDrag(el, id) {
+  let lastSent = 0;
+  const move = (e) => {
+    const r = board.getBoundingClientRect();
+    const x = Math.min(100, Math.max(0, (e.clientX - r.left) / r.width * 100));
+    const y = Math.min(100, Math.max(0, (e.clientY - r.top) / r.height * 100));
+    el.style.left = x + '%';
+    el.style.top = y + '%';
+    const now = performance.now();
+    if (now - lastSent > 40) { lastSent = now; socket.emit('token:move', { id, x, y }); }
+  };
+  el.addEventListener('pointerdown', (e) => {
+    el.setPointerCapture(e.pointerId);
+    el.classList.add('dragging');
+    el.addEventListener('pointermove', move);
+  });
+  const stop = (e) => {
+    el.removeEventListener('pointermove', move);
+    el.classList.remove('dragging');
+    move(e); // envía siempre la posición final
+    socket.emit('token:move', { id, x: parseFloat(el.style.left), y: parseFloat(el.style.top) });
+  };
+  el.addEventListener('pointerup', stop);
+  el.addEventListener('pointercancel', stop);
+}
+
+let tokenImage = null;
+$('tokImgBtn').onclick = () => $('tokImg').click();
+$('tokImg').onchange = async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    tokenImage = await fileToDataUrl(file, 160, 'image/webp', 0.85);
+    $('tokImgName').textContent = file.name;
+  } catch (err) { alert(err.message); }
+  e.target.value = '';
+};
+
+$('tokAdd').onclick = () => {
+  if (!mapRatio) { alert('Sube primero un mapa.'); return; }
+  socket.emit('token:add', {
+    id: newId(),
+    name: $('tokName').value.trim(),
+    color: $('tokColor').value,
+    image: tokenImage,
+    size: Number($('tokSize').value),
+    x: 50, y: 50
+  });
+  $('tokName').value = '';
+  tokenImage = null;
+  $('tokImgName').textContent = '';
+};
+
+/* ---------- Mensajes del servidor ---------- */
+
+socket.on('state', (s) => {
+  Object.values(tokens).forEach((el) => el.remove());
+  for (const id in tokens) delete tokens[id];
+  setMap(s.map);
+  Object.values(s.tokens).forEach(renderToken);
+});
+socket.on('map:set', setMap);
+socket.on('token:add', renderToken);
+socket.on('token:move', ({ id, x, y }) => {
+  const el = tokens[id];
+  if (el) { el.style.left = x + '%'; el.style.top = y + '%'; }
+});
+socket.on('token:remove', (id) => {
+  if (tokens[id]) { tokens[id].remove(); delete tokens[id]; }
+});
+</script>
+</body>
+</html>

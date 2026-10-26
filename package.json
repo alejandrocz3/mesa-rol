@@ -1,0 +1,13 @@
+{
+  "name": "mesa-rol",
+  "version": "1.0.0",
+  "description": "Mesa virtual sencilla para partidas de rol: mapa de fondo y fichas móviles en tiempo real",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}
