@@ -59,6 +59,34 @@
     margin-top: 3px; padding: 1px 6px; border-radius: 4px; white-space: nowrap;
     background: rgba(0,0,0,.75); font-size: 12px; pointer-events: none;
   }
+
+  .main { flex: 1; display: flex; min-height: 0; }
+  .stage { min-width: 0; }
+  .chat {
+    width: 300px; display: flex; flex-direction: column;
+    background: var(--panel); border-left: 1px solid var(--line);
+  }
+  .log { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .msg { overflow-wrap: anywhere; }
+  .msg .who { font-weight: 600; margin-right: 6px; }
+  .msg.roll { padding: 6px 8px; border-left: 3px solid var(--accent); background: var(--bg); border-radius: 0 6px 6px 0; }
+  .msg.roll .detail { color: #9aa0a8; font-size: 13px; }
+  .msg.roll .total { font-size: 22px; font-weight: 700; }
+  .msg.roll.crit { border-left-color: #e0b341; }
+  .msg.roll.crit .total { color: #e0b341; }
+  .msg.roll.fumble { border-left-color: #d9534f; }
+  .msg.roll.fumble .total { color: #d9534f; }
+  .msg.system { color: #9aa0a8; font-size: 13px; }
+  .dice { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--line); }
+  .dice button { padding: 4px 9px; }
+  .chat-form { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 12px; border-top: 1px solid var(--line); }
+  .chat-form input[type="text"] { width: auto; min-width: 0; }
+  #chatName { flex: 0 0 100%; }
+  #chatText { flex: 1; }
+  @media (max-width: 800px) {
+    .main { flex-direction: column; }
+    .chat { width: auto; height: 40%; border-left: 0; border-top: 1px solid var(--line); }
+  }
 </style>
 </head>
 <body>
@@ -82,9 +110,29 @@
   <span class="hint">Arrastra para mover · doble clic en una ficha para borrarla</span>
 </div>
 
-<div class="stage" id="stage">
-  <p class="empty" id="empty">Todavía no hay mapa. Sube una imagen para empezar la sesión.</p>
-  <div id="board"></div>
+<div class="main">
+  <div class="stage" id="stage">
+    <p class="empty" id="empty">Todavía no hay mapa. Sube una imagen para empezar la sesión.</p>
+    <div id="board"></div>
+  </div>
+
+  <aside class="chat">
+    <div class="log" id="chatLog" aria-live="polite"></div>
+    <div class="dice" id="diceBtns">
+      <button data-roll="/r d4">d4</button>
+      <button data-roll="/r d6">d6</button>
+      <button data-roll="/r d8">d8</button>
+      <button data-roll="/r d10">d10</button>
+      <button data-roll="/r d12">d12</button>
+      <button data-roll="/r d20">d20</button>
+      <button data-roll="/r d100">d100</button>
+    </div>
+    <form class="chat-form" id="chatForm" autocomplete="off">
+      <input id="chatName" type="text" placeholder="Tu nombre" maxlength="20" aria-label="Tu nombre">
+      <input id="chatText" type="text" placeholder="Mensaje o /r 2d6+3" maxlength="300" aria-label="Mensaje">
+      <button class="primary" type="submit">Enviar</button>
+    </form>
+  </aside>
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
@@ -143,7 +191,7 @@ function fitBoard() {
   board.style.width = bw + 'px';
   board.style.height = bh + 'px';
 }
-window.addEventListener('resize', fitBoard);
+new ResizeObserver(fitBoard).observe(stage); // recalcula al cambiar la ventana o el panel del chat
 
 $('mapBtn').onclick = () => $('mapFile').click();
 $('mapFile').onchange = async (e) => {
@@ -233,6 +281,61 @@ $('tokAdd').onclick = () => {
   $('tokImgName').textContent = '';
 };
 
+/* ---------- Chat y dados ---------- */
+
+const chatLog = $('chatLog');
+
+// El nombre se recuerda en este navegador (si el almacenamiento no está disponible, simplemente no se guarda).
+try { $('chatName').value = localStorage.getItem('chatName') || ''; } catch (e) {}
+$('chatName').addEventListener('change', () => {
+  try { localStorage.setItem('chatName', $('chatName').value.trim()); } catch (e) {}
+});
+
+function sendChat(text) {
+  socket.emit('chat:send', { name: $('chatName').value.trim(), text });
+}
+
+function renderMsg(m) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + m.type;
+  if (m.type === 'chat') {
+    const who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = m.name;
+    el.append(who, document.createTextNode(m.text));
+  } else if (m.type === 'roll') {
+    const title = document.createElement('div');
+    title.textContent = `${m.name} tira ${m.expr}`;
+    const detail = document.createElement('div');
+    detail.className = 'detail';
+    const modTxt = m.mod ? ` ${m.mod > 0 ? '+' : '−'} ${Math.abs(m.mod)}` : '';
+    detail.textContent = `[${m.rolls.join(', ')}]${modTxt}`;
+    const total = document.createElement('div');
+    total.className = 'total';
+    total.textContent = m.total;
+    el.append(title, detail, total);
+    if (m.sides === 20 && m.count === 1) {      // critico o pifia con un solo d20
+      if (m.rolls[0] === 20) el.classList.add('crit');
+      if (m.rolls[0] === 1) el.classList.add('fumble');
+    }
+  } else {
+    el.textContent = m.text;
+  }
+  chatLog.appendChild(el);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+$('chatForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = $('chatText');
+  if (input.value.trim()) sendChat(input.value);
+  input.value = '';
+});
+$('diceBtns').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-roll]');
+  if (btn) sendChat(btn.dataset.roll);
+});
+
 /* ---------- Mensajes del servidor ---------- */
 
 socket.on('state', (s) => {
@@ -240,8 +343,11 @@ socket.on('state', (s) => {
   for (const id in tokens) delete tokens[id];
   setMap(s.map);
   Object.values(s.tokens).forEach(renderToken);
+  chatLog.replaceChildren();
+  s.log.forEach(renderMsg);
 });
 socket.on('map:set', setMap);
+socket.on('chat:msg', renderMsg);
 socket.on('token:add', renderToken);
 socket.on('token:move', ({ id, x, y }) => {
   const el = tokens[id];
